@@ -5,7 +5,7 @@
 # GitHub Releases; the client half (client.js) renders the state next to the
 # sidebar logo (or in the sidebar foot when the official build owns that slot).
 #
-# Installed with: dsh plugin --profile web add "github:ywleeo/dsh-version-check#main"
+# Installed with: dsh plugin --profile web add "github:DSH43/dsh-version-check#main"
 - insert:
     - id: dsh-version-check
       name: dsh-version-check
