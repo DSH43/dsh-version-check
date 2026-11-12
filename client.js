@@ -31,6 +31,11 @@ window.__ModuleLoader__.load({
     var NS = 'versionCheck'
     var POLL_MS = 30 * 60 * 1000
     var STATUS_URL = '/plugins/dsh-version-check/status'
+    var UPGRADE_URL = '/plugins/dsh-version-check/upgrade'
+    /** 升级进行中时的轮询间隔：本地接口，读状态文件而已。 */
+    var JOB_POLL_MS = 1200
+    /** 完成/失败记录留多久。重启过之后那条「重启让它生效」就不该再露面。 */
+    var JOB_KEEP_MS = 2 * 60 * 60 * 1000
 
     var STRINGS = {
       zh: {
@@ -53,6 +58,37 @@ window.__ModuleLoader__.load({
         refresh: '重新检查',
         openRelease: '打开发布页',
         close: '关闭',
+        copyCommand: '复制命令',
+        copied: '已复制',
+        copyFailed: '复制失败，手动选中命令复制',
+        upgradeTo: '升级到 {v}',
+        confirmUpgrade: '确认升级到 {v}',
+        cancel: '取消',
+        confirmNote: '确认后 dsh 会立刻停掉，这个页面会断开，构建完自动重启并刷新。构建期间 ./start.sh 会拒绝启动，别手动去起。构建一般要两三分钟。',
+        upgradingTo: '正在升级到 {v}',
+        phaseStart: '启动中',
+        phaseFetch: '拉取新版本',
+        phaseCheckout: '切换版本',
+        phaseInstall: '安装依赖',
+        phaseBuild: '重新构建',
+        phaseVerify: '收尾',
+        restartAfter: '构建完成后会提示重启。',
+        restartAfterAuto: '正在停止 dsh 并构建，页面马上断开，完成后自动回来。',
+        autoRestartHint: '页面会自己刷新到新版本。',
+        restartHint: '重启让它生效：{cmd}',
+        upgradeDone: '已升级到 {v}',
+        versionMismatch: '装完读到的版本是 {v}，和预期不一致',
+        upgradeFailed: '升级失败（退出码 {code}）',
+        rollbackHint: '退回原来的版本：{cmd}',
+        startFailed: '升级没能启动：{code}',
+        blockedDirty: '仓库有未提交的改动，自动升级会覆盖它们。先提交或 stash。',
+        blockedNoGit: '找不到可用的 git。',
+        blockedNoPnpm: '找不到 pnpm。',
+        blockedNoRemote: '这个仓库没配 git remote。',
+        blockedNoNpm: '找不到 npm。',
+        blockedUnknown: '认不出这台机器上的安装方式。',
+        blockedNoVersion: '还没查到官方最新版本。',
+        noCommand: '没有可用的升级命令。',
         noReleases: '官方仓库没有找到 dsh-v* 的 Release',
         errNetwork: '连不上 GitHub',
         errHttp: 'GitHub 接口请求失败',
@@ -86,6 +122,37 @@ window.__ModuleLoader__.load({
         refresh: 'Recheck',
         openRelease: 'Open release',
         close: 'Close',
+        copyCommand: 'Copy command',
+        copied: 'Copied',
+        copyFailed: 'Copy failed — select the command and copy it manually',
+        upgradeTo: 'Upgrade to {v}',
+        confirmUpgrade: 'Confirm upgrade to {v}',
+        cancel: 'Cancel',
+        confirmNote: 'dsh stops right away and this page disconnects; it restarts and reloads on its own when the build finishes. ./start.sh refuses to start anything while the build lock is held. Expect a few minutes.',
+        upgradingTo: 'Upgrading to {v}',
+        phaseStart: 'starting',
+        phaseFetch: 'fetching tags',
+        phaseCheckout: 'switching version',
+        phaseInstall: 'installing dependencies',
+        phaseBuild: 'rebuilding',
+        phaseVerify: 'finishing',
+        restartAfter: 'You will be told when to restart.',
+        restartAfterAuto: 'Stopping dsh to build. This page disconnects and comes back on its own.',
+        autoRestartHint: 'The page will reload on the new version.',
+        restartHint: 'Restart to apply: {cmd}',
+        upgradeDone: 'Upgraded to {v}',
+        versionMismatch: 'installed version reads {v}, expected a different one',
+        upgradeFailed: 'Upgrade failed (exit {code})',
+        rollbackHint: 'Go back to the old version: {cmd}',
+        startFailed: 'Upgrade did not start: {code}',
+        blockedDirty: 'The repository has uncommitted changes an upgrade would overwrite. Commit or stash them first.',
+        blockedNoGit: 'git not found.',
+        blockedNoPnpm: 'pnpm not found.',
+        blockedNoRemote: 'No git remote configured.',
+        blockedNoNpm: 'npm not found.',
+        blockedUnknown: 'Unrecognized install layout on this machine.',
+        blockedNoVersion: 'No upstream version known yet.',
+        noCommand: 'No upgrade command available.',
         noReleases: 'No dsh-v* release found in the official repository',
         errNetwork: 'Cannot reach GitHub',
         errHttp: 'GitHub API request failed',
@@ -144,6 +211,27 @@ window.__ModuleLoader__.load({
       h('path', { d: 'M14 4h6v6' }),
       h('path', { d: 'M20 4 11 13' }),
       h('path', { d: 'M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5' }),
+    )
+
+    var ICON_COPY = h('svg', {
+      viewBox: '0 0 24 24', width: 14, height: 14, fill: 'none',
+      stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true',
+    },
+      h('rect', { x: 9, y: 9, width: 11, height: 11, rx: 2 }),
+      h('path', { d: 'M5 15V5a2 2 0 0 1 2-2h8' }),
+    )
+
+    var ICON_CHECK = h('svg', {
+      viewBox: '0 0 24 24', width: 14, height: 14, fill: 'none',
+      stroke: 'currentColor', strokeWidth: 2.2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true',
+    }, h('path', { d: 'M20 6 9 17l-5-5' }))
+
+    var ICON_UPGRADE = h('svg', {
+      viewBox: '0 0 24 24', width: 14, height: 14, fill: 'none',
+      stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true',
+    },
+      h('path', { d: 'M12 19V5' }),
+      h('path', { d: 'm5 12 7-7 7 7' }),
     )
 
     /**
@@ -282,10 +370,163 @@ window.__ModuleLoader__.load({
       return t('checking') + '…'
     }
 
+    var BLOCKED_LABEL = {
+      dirty: 'blockedDirty',
+      'no-git': 'blockedNoGit',
+      'no-pnpm': 'blockedNoPnpm',
+      'no-remote': 'blockedNoRemote',
+      'no-npm': 'blockedNoNpm',
+      'unknown-install': 'blockedUnknown',
+      'no-version': 'blockedNoVersion',
+    }
+
+    function blockedText(t, install) {
+      var key = BLOCKED_LABEL[install.blocked]
+      var text = key === undefined ? t('blockedUnknown') : t(key)
+      if (typeof install.blockedDetail === 'string' && install.blockedDetail !== '') {
+        text = text + ' ' + install.blockedDetail
+      }
+      return text
+    }
+
+    var PHASE_LABEL = {
+      start: 'phaseStart',
+      fetch: 'phaseFetch',
+      checkout: 'phaseCheckout',
+      install: 'phaseInstall',
+      build: 'phaseBuild',
+      verify: 'phaseVerify',
+    }
+
+    function phaseText(t, phase) {
+      var key = PHASE_LABEL[phase]
+      return key === undefined ? t('phaseStart') : t(key)
+    }
+
+    /**
+     * 该不该把上一轮升级的记录显示出来。
+     * 装完并且已经重启到那个版本了，就没什么好说的；太旧的记录也收起来。
+     */
+    function visibleJob(job, current) {
+      if (job === null || typeof job !== 'object') return null
+      if (job.state === 'running') return job
+      if (job.state === 'done' && current !== null && (job.installedVersion === current || job.version === current)) return null
+      if (typeof job.finishedAt === 'number' && Date.now() - job.finishedAt > JOB_KEEP_MS) return null
+      return job
+    }
+
+    /** 写剪贴板。http://127.0.0.1 算安全上下文，clipboard 一般可用；不行就退回老办法。 */
+    function copyText(text) {
+      return new Promise(function (resolve, reject) {
+        function legacy() {
+          try {
+            var area = document.createElement('textarea')
+            area.value = text
+            area.setAttribute('readonly', '')
+            area.style.position = 'fixed'
+            area.style.opacity = '0'
+            document.body.appendChild(area)
+            area.select()
+            var ok = document.execCommand('copy')
+            document.body.removeChild(area)
+            if (ok) resolve()
+            else reject(new Error('copy failed'))
+          } catch (error) {
+            reject(error)
+          }
+        }
+        try {
+          if (navigator.clipboard !== undefined && navigator.clipboard !== null && typeof navigator.clipboard.writeText === 'function') {
+            navigator.clipboard.writeText(text).then(resolve, legacy)
+            return
+          }
+        } catch { /* 掉到老办法 */ }
+        legacy()
+      })
+    }
+
+    /**
+     * 轮询升级任务。只在弹窗打开时跑：弹窗一关，定时器就没了。
+     * 老版本 host 没有这个路由，返回 404，这里当「没有任务」处理。
+     */
+    function useUpgradeJob(enabled) {
+      var pair = useState(null)
+      var job = pair[0]
+      var setJob = pair[1]
+      useEffect(function () {
+        if (enabled !== true) return undefined
+        var alive = true
+        function tick() {
+          if (!alive) return
+          fetch(UPGRADE_URL, { cache: 'no-store' })
+            .then(function (response) { return response.ok === true ? response.json() : null })
+            .then(function (result) {
+              if (!alive) return
+              if (result !== null && typeof result === 'object' && result.ok === true) {
+                setJob(result.job !== undefined ? result.job : null)
+              }
+            })
+            .catch(function () { /* host 还没有这个路由，忽略 */ })
+        }
+        tick()
+        var timer = setInterval(tick, JOB_POLL_MS)
+        return function () { alive = false; clearInterval(timer) }
+      }, [enabled])
+      return [job, setJob]
+    }
+
     function VersionDialog(props) {
       var t = props.t
       var info = versionInfo(props.data, props.error)
       var latest = info.latest
+      var install = props.data !== null && typeof props.data === 'object'
+        && props.data.install !== null && typeof props.data.install === 'object' ? props.data.install : null
+      var jobPair = useUpgradeJob(install !== null)
+      var job = jobPair[0]
+      var setJob = jobPair[1]
+      var copiedPair = useState(false)
+      var copied = copiedPair[0]
+      var setCopied = copiedPair[1]
+      var confirmPair = useState(false)
+      var confirming = confirmPair[0]
+      var setConfirming = confirmPair[1]
+      var startPair = useState({ busy: false, error: null })
+      var start = startPair[0]
+      var setStart = startPair[1]
+
+      function onCopy() {
+        if (install === null || typeof install.command !== 'string' || install.command === '') return
+        copyText(install.command).then(function () {
+          setCopied(true)
+          setTimeout(function () { setCopied(false) }, 1800)
+        }, function () {
+          setStart({ busy: false, error: 'copy-failed' })
+        })
+      }
+
+      function onUpgrade() {
+        if (latest === null) return
+        setStart({ busy: true, error: null })
+        fetch(UPGRADE_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ version: latest.version, tag: latest.tag, confirm: true }),
+        })
+          .then(function (response) { return response.json() })
+          .then(function (result) {
+            if (result !== null && typeof result === 'object' && result.ok === true && result.job !== undefined) {
+              setJob(result.job)
+              setConfirming(false)
+              setStart({ busy: false, error: null })
+              return
+            }
+            var code = result !== null && typeof result === 'object' && typeof result.error === 'string' ? result.error : 'unknown'
+            setStart({ busy: false, error: code })
+          })
+          .catch(function (error) {
+            setStart({ busy: false, error: String((error && error.message) || error) })
+          })
+      }
 
       useEffect(function () {
         function onKeyDown(event) {
@@ -356,13 +597,138 @@ window.__ModuleLoader__.load({
               onClick: function () { props.onClose() },
             }, ICON_CLOSE)),
           h('div', { className: 'dsvc-rows' }, rows),
-          h('div', { className: 'dsvc-hint' },
-            h('div', { className: 'dsvc-hint-title' }, t('howTo')),
-            h('div', { className: 'dsvc-hint-line' }, t('sourceHint')),
-            h('div', { className: 'dsvc-hint-line' }, t('npmHint'))),
+          h(UpdateBlock, {
+            t: t,
+            install: install,
+            job: job,
+            latest: latest,
+            current: info.current,
+            available: info.status === 'available',
+            copied: copied,
+            confirming: confirming,
+            busy: start.busy,
+            error: start.error,
+            onCopy: onCopy,
+            onUpgrade: onUpgrade,
+            onConfirm: function () { setConfirming(true) },
+            onCancel: function () { setConfirming(false) },
+          }),
           h('div', { className: 'dsvc-foot' }, foot),
         ),
       )
+    }
+
+    /**
+     * 弹窗下半块：升级命令、复制、升级按钮，以及升级中的进度和结果。
+     * 老版本 host 没有 install 字段，这时退回原来的两行说明。
+     */
+    function UpdateBlock(props) {
+      var t = props.t
+      var install = props.install
+      var job = visibleJob(props.job, typeof props.current === 'string' ? props.current : null)
+      var latest = props.latest
+      var children = [h('div', { key: 'title', className: 'dsvc-hint-title' }, t('howTo'))]
+      var running = job !== null && typeof job === 'object' && job.state === 'running'
+
+      if (running) {
+        children.push(h('div', { key: 'bar', className: 'dsvc-bar' }))
+        children.push(h('div', { key: 'phase', className: 'dsvc-note' },
+          t('upgradingTo', { v: job.version }) + ' · ' + phaseText(t, job.phase)))
+        if (Array.isArray(job.log) && job.log.length > 0) {
+          children.push(h('pre', { key: 'log', className: 'dsvc-log' }, job.log.join('\n')))
+        }
+        children.push(h('div', { key: 'restart', className: 'dsvc-note dsvc-note-dim' },
+          job.auto === true ? t('restartAfterAuto') : t('restartAfter')))
+        return h('div', { className: 'dsvc-update' }, children)
+      }
+
+      if (job !== null && typeof job === 'object' && job.state === 'done') {
+        children.push(h('div', { key: 'done', className: 'dsvc-note dsvc-ok' },
+          t('upgradeDone', { v: job.installedVersion || job.version })))
+        if (job.warning === 'version-mismatch') {
+          children.push(h('div', { key: 'warn', className: 'dsvc-note dsvc-warn' }, t('versionMismatch', { v: job.installedVersion })))
+        }
+        if (job.auto === true) {
+          children.push(h('div', { key: 'restart', className: 'dsvc-note' }, t('autoRestartHint')))
+        } else {
+          children.push(h('div', { key: 'restart', className: 'dsvc-note' }, t('restartHint', { cmd: job.restart || 'dsh web' })))
+        }
+        if (Array.isArray(job.log) && job.log.length > 0) {
+          children.push(h('pre', { key: 'log', className: 'dsvc-log' }, job.log.slice(-6).join('\n')))
+        }
+        return h('div', { className: 'dsvc-update' }, children)
+      }
+
+      if (job !== null && typeof job === 'object' && (job.state === 'failed' || job.state === 'lost')) {
+        var code = job.state === 'lost' || job.exitCode === null || job.exitCode === undefined ? '?' : job.exitCode
+        children.push(h('div', { key: 'fail', className: 'dsvc-note dsvc-fail' }, t('upgradeFailed', { code: String(code) })))
+        if (Array.isArray(job.log) && job.log.length > 0) {
+          children.push(h('pre', { key: 'log', className: 'dsvc-log' }, job.log.join('\n')))
+        }
+        if (typeof job.rollback === 'string' && job.rollback !== '') {
+          children.push(h('div', { key: 'rollback', className: 'dsvc-note dsvc-note-dim' }, t('rollbackHint', { cmd: job.rollback })))
+        }
+      }
+
+      if (install === null) {
+        children.push(h('div', { key: 'source', className: 'dsvc-hint-line' }, t('sourceHint')))
+        children.push(h('div', { key: 'npm', className: 'dsvc-hint-line' }, t('npmHint')))
+        return h('div', { className: 'dsvc-update' }, children)
+      }
+
+      if (typeof install.command === 'string' && install.command !== '') {
+        children.push(h('div', { key: 'cmd', className: 'dsvc-cmd', title: install.command }, install.command))
+      } else {
+        children.push(h('div', { key: 'cmd', className: 'dsvc-cmd dsvc-note-dim' }, t('noCommand')))
+      }
+      if (install.blocked !== null && install.blocked !== undefined) {
+        children.push(h('div', { key: 'blocked', className: 'dsvc-note dsvc-warn' }, blockedText(t, install)))
+      }
+
+      var actions = [
+        h('button', {
+          key: 'copy',
+          type: 'button',
+          className: 'dsvc-btn',
+          disabled: typeof install.command !== 'string' || install.command === '',
+          onClick: function () { props.onCopy() },
+        }, props.copied === true ? ICON_CHECK : ICON_COPY, h('span', null, props.copied === true ? t('copied') : t('copyCommand'))),
+      ]
+
+      if (props.confirming === true && latest !== null && props.available === true) {
+        actions.push(h('button', {
+          key: 'cancel',
+          type: 'button',
+          className: 'dsvc-btn',
+          onClick: function () { props.onCancel() },
+        }, h('span', null, t('cancel'))))
+        actions.push(h('button', {
+          key: 'go',
+          type: 'button',
+          className: 'dsvc-btn dsvc-btn-primary',
+          disabled: props.busy === true,
+          onClick: function () { props.onUpgrade() },
+        }, ICON_UPGRADE, h('span', null, props.busy === true ? t('phaseStart') : t('confirmUpgrade', { v: latest.version }))))
+      } else if (latest !== null && props.available === true) {
+        actions.push(h('button', {
+          key: 'upgrade',
+          type: 'button',
+          className: 'dsvc-btn dsvc-btn-primary',
+          disabled: install.canUpgrade !== true,
+          onClick: function () { props.onConfirm() },
+        }, ICON_UPGRADE, h('span', null, t('upgradeTo', { v: latest.version }))))
+      }
+
+      children.push(h('div', { key: 'actions', className: 'dsvc-actions' }, actions))
+      if (props.confirming === true) {
+        children.push(h('div', { key: 'confirm', className: 'dsvc-note dsvc-warn' }, t('confirmNote')))
+      }
+      if (props.error === 'copy-failed') {
+        children.push(h('div', { key: 'error', className: 'dsvc-note dsvc-fail' }, t('copyFailed')))
+      } else if (props.error !== null && props.error !== undefined) {
+        children.push(h('div', { key: 'error', className: 'dsvc-note dsvc-fail' }, t('startFailed', { code: String(props.error) })))
+      }
+      return h('div', { className: 'dsvc-update' }, children)
     }
 
     /** 品牌名槽位的占位者：两行，第二行是版本状态。 */
@@ -527,6 +893,27 @@ window.__ModuleLoader__.load({
         '.dsvc-hint { flex: none; padding: 10px 14px 12px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.06));',
         '  font-size: 12px; line-height: 1.8; color: var(--dsw-alias-label-secondary, #4b5563); }',
         '.dsvc-hint-title { font-size: 11px; color: var(--dsw-alias-label-tertiary, #6b7280); margin-bottom: 2px; }',
+        // 升级块：命令、按钮、进度、日志。
+        '.dsvc-update { flex: 0 1 auto; padding: 10px 14px 12px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.06));',
+        '  overflow: auto; font-size: 12px; line-height: 1.7; color: var(--dsw-alias-label-secondary, #4b5563); }',
+        '.dsvc-cmd { margin-top: 4px; padding: 7px 9px; border-radius: 7px; background: var(--dsw-alias-bg-layer-1, rgba(0,0,0,.045));',
+        '  font-family: var(--ds-font-family-code, ui-monospace, monospace); font-size: 11.5px; line-height: 1.55; color: var(--dsw-alias-label-primary, #1f2328);',
+        '  word-break: normal; overflow-wrap: anywhere; }',
+        '.dsvc-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }',
+        '.dsvc-note { margin-top: 6px; font-size: 11.5px; line-height: 1.7; color: var(--dsw-alias-label-secondary, #4b5563); word-break: break-word; }',
+        '.dsvc-note-dim { color: var(--dsw-alias-label-tertiary, #6b7280); }',
+        '.dsvc-ok { color: var(--dsw-alias-state-success-primary, #15803d); }',
+        '.dsvc-fail { color: var(--dsw-alias-state-error-primary, #dc2626); }',
+        '.dsvc-warn { color: var(--dsw-alias-state-warn-label, #b45309); }',
+        '.dsvc-log { margin: 8px 0 0; padding: 7px 9px; max-height: 128px; overflow: auto; border-radius: 7px;',
+        '  background: var(--dsw-alias-bg-layer-1, rgba(0,0,0,.045)); color: var(--dsw-alias-label-secondary, #4b5563);',
+        '  font-family: var(--ds-font-family-code, ui-monospace, monospace); font-size: 11px; line-height: 1.55;',
+        '  white-space: pre-wrap; overflow-wrap: anywhere; }',
+        '.dsvc-bar { position: relative; height: 3px; margin: 6px 0 8px; border-radius: 2px; overflow: hidden;',
+        '  background: var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.08)); }',
+        '.dsvc-bar::after { content: ""; position: absolute; top: 0; bottom: 0; width: 34%; border-radius: 2px;',
+        '  background: var(--dsw-static-deepseek-500, #4176e6); animation: dsvc-slide 1.15s ease-in-out infinite; }',
+        '@keyframes dsvc-slide { from { left: -34%; } to { left: 100%; } }',
         '.dsvc-foot { display: flex; align-items: center; gap: 8px; padding: 10px 14px; flex: none;',
         '  border-top: 1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.06)); }',
         '.dsvc-btn { display: inline-flex; align-items: center; gap: 5px; padding: 6px 10px; border-radius: 8px;',
@@ -534,6 +921,9 @@ window.__ModuleLoader__.load({
         '  color: var(--dsw-alias-label-secondary, #4b5563); font-family: inherit; font-size: 13px; text-decoration: none; }',
         '.dsvc-btn:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.06)); color: var(--dsw-alias-label-primary, #1f2328); }',
         '.dsvc-btn:disabled { opacity: .55; cursor: default; }',
+        '.dsvc-btn-primary { border-color: transparent; background: var(--dsw-static-deepseek-500, #4176e6); color: #fff; }',
+        '.dsvc-btn-primary:hover { background: var(--dsw-static-deepseek-600, #3462c9); color: #fff; }',
+        '.dsvc-btn-primary:disabled { opacity: .5; }',
         '.dsvc-btn-end { margin-left: auto; }',
       ].join('\n')
       document.head.appendChild(style)
@@ -591,6 +981,8 @@ window.__ModuleLoader__.load({
       name: 'dsh-version-check',
       inject: ['slots'],
       apply: apply,
+      /** 测试用：直接渲染弹窗的两块。 */
+      __components: { VersionDialog: VersionDialog, UpdateBlock: UpdateBlock },
     }
   },
 })

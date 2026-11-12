@@ -1,6 +1,6 @@
 {
   "name": "dsh-version-check",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "在 dsh Web 侧栏 logo 旁显示官方是否发布了新的 DSH 版本",
   "license": "MIT",
   "type": "module",
