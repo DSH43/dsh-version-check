@@ -1,0 +1,11 @@
+# dsh-version-check bundle patch: mounts the version indicator into a dsh web
+# composition.
+#
+# Host half (index.js → host.js) reads the running dsh version and the official
+# GitHub Releases; the client half (client.js) renders the state next to the
+# sidebar logo (or in the sidebar foot when the official build owns that slot).
+#
+# Installed with: dsh plugin --profile web add "github:ywleeo/dsh-version-check#main"
+- insert:
+    - id: dsh-version-check
+      name: dsh-version-check
