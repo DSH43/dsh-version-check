@@ -47,6 +47,63 @@ check('0.2.2-rc.2 > 0.2.1-rc.5', cmp('0.2.2-rc.2', '0.2.1-rc.5') === 1)
 check('alpha < rc', cmp('0.2.2-alpha.3', '0.2.2-rc.1') === -1)
 check('相同版本相等', cmp('0.2.1-rc.5', '0.2.1-rc.5') === 0)
 
+console.log('更新说明解析')
+const sampleNotes = internals.summarizeNotes([
+  '[中文](#cn-9.9.9) | [English](#en-9.9.9)',
+  '',
+  '作为 9.9 系列的首个版本，汇总了主要变更。',
+  '',
+  '<h3 id="cn-9.9.9">新增功能</h3>',
+  '',
+  '- 新增 **导出** 功能，支持 `markdown`。 @alice',
+  '- 修复弹窗溢出 &amp; 折行。',
+  '',
+  '### 问题修复',
+  '',
+  '- 修复窄屏下的布局。',
+  '',
+  '<h3 id="en-9.9.9">New Features</h3>',
+  '',
+  '- Add an export feature. by @alice',
+  '',
+  'Full Changelog: https://github.com/x/y/compare/a...b',
+].join('\n'))
+check('中英文分开收', sampleNotes !== null && sampleNotes.zh !== undefined && sampleNotes.en !== undefined)
+check('中文按小节分组', sampleNotes.zh.sections.length === 2 && sampleNotes.zh.sections[0].title === '新增功能'
+  && sampleNotes.zh.sections[1].title === '问题修复', JSON.stringify(sampleNotes.zh.sections.map((s) => s.title)))
+check('英文单独一节', sampleNotes.en.sections.length === 1 && sampleNotes.en.sections[0].title === 'New Features',
+  JSON.stringify(sampleNotes.en.sections.map((s) => s.title)))
+check('英文里不掺中文条目', sampleNotes.en.sections.every((s) => s.items.every((item) => !/[\u4e00-\u9fff]/.test(item))))
+check('导语单独留着', sampleNotes.zh.intro === '作为 9.9 系列的首个版本，汇总了主要变更。', JSON.stringify(sampleNotes.zh.intro))
+check('去掉 markdown 记号', sampleNotes.zh.sections[0].items[0] === '新增 导出 功能，支持 markdown。 @alice',
+  JSON.stringify(sampleNotes.zh.sections[0].items[0]))
+check('HTML 实体还原', sampleNotes.zh.sections[0].items[1].includes(' & ') && !sampleNotes.zh.sections[0].items[1].includes('&amp;'),
+  JSON.stringify(sampleNotes.zh.sections[0].items[1]))
+check('不收 Full Changelog 行', !JSON.stringify(sampleNotes).includes('Full Changelog'))
+check('总数按全部条目算', sampleNotes.zh.total === 3, String(sampleNotes.zh.total))
+check('空正文返回 null', internals.summarizeNotes('') === null && internals.summarizeNotes(undefined) === null)
+
+const manyNotes = ['<h3 id="cn-x">新增功能</h3>']
+for (let index = 1; index <= 30; index += 1) manyNotes.push('- 第 ' + index + ' 条更新。')
+const cappedNotes = internals.summarizeNotes(manyNotes.join('\n'))
+check('每个小节只留前 4 条', cappedNotes.zh.sections[0].items.length === 4, String(cappedNotes.zh.sections[0].items.length))
+check('截断后总数照样是全部', cappedNotes.zh.total === 30, String(cappedNotes.zh.total))
+
+const introOnly = internals.summarizeNotes('这一版只修了安全问题，没有新功能。')
+check('只有导语的正文也留得住', introOnly !== null && introOnly.zh.intro === '这一版只修了安全问题，没有新功能。'
+  && introOnly.zh.sections.length === 0, JSON.stringify(introOnly))
+
+const wideNotes = []
+for (let index = 1; index <= 10; index += 1) {
+  wideNotes.push('<h3>第 ' + index + ' 节</h3>')
+  for (let item = 1; item <= 4; item += 1) wideNotes.push('- 第 ' + index + ' 节第 ' + item + ' 条。')
+}
+const wide = internals.summarizeNotes(wideNotes.join('\n'))
+check('全局上限守住', wide.zh.sections.reduce((sum, section) => sum + section.items.length, 0) === 32,
+  JSON.stringify(wide.zh.sections.map((section) => section.items.length)))
+check('超出上限的小节不再出现', wide.zh.sections.length === 8, String(wide.zh.sections.length))
+check('总数仍然统计全部小节', wide.zh.total === 40, String(wide.zh.total))
+
 console.log('本机版本')
 const expected = JSON.parse(readFileSync('/Users/leeo/Code/deepseek-harness/apps/cli/package.json', 'utf8')).version
 const localVersion = internals.resolveLocalVersion()
@@ -100,6 +157,17 @@ if (status.ok !== true) {
   check('latest 带发布页链接', typeof status.latest.url === 'string' && status.latest.url.startsWith('https://github.com/'), String(status.latest.url))
   check('latest 带发布时间', typeof status.latest.publishedAt === 'string', String(status.latest.publishedAt))
   check('预发布标记是布尔', typeof status.latest.prerelease === 'boolean')
+  check('latest 带更新说明字段', 'notes' in status.latest)
+  if (status.latest.notes !== null) {
+    const notes = status.latest.notes
+    check('更新说明分语言', typeof notes === 'object' && Object.keys(notes).length > 0, JSON.stringify(Object.keys(notes)))
+    const first = notes[Object.keys(notes)[0]]
+    check('更新说明有可显示的条目', Array.isArray(first.sections) && first.sections.some((s) => s.items.length > 0),
+      JSON.stringify(first.sections.map((s) => s.title)))
+    check('更新说明带条目总数', typeof first.total === 'number' && first.total >= 1, String(first.total))
+  } else {
+    console.log('  ! 最新 Release 没有正文，更新说明为空')
+  }
 }
 
 console.log('安装形态与升级计划')
@@ -124,6 +192,7 @@ check('脚本逐个 phase 推进', ['step fetch', 'step checkout', 'step install
 check('脚本对失败留痕', script.includes('>"$DIR/done"'))
 check('先停旧的再动手', script.indexOf('stop_ui\n') > 0 && script.indexOf('stop_ui') < script.indexOf('step fetch'), String(script.indexOf('stop_ui')))
 check('构建完自己起回来并刷新', script.includes('restart_ui') && script.includes('./start.sh --refresh'))
+check('启动器里只解锁、不自己重启', script.includes('DSH_LAUNCHER:-') && script.includes('then return 0; fi'))
 check('停的时候按 pid 发 TERM', script.includes('kill -TERM "$SERVER_PID"'))
 check('失败先回退再重启', script.includes('phase rollback') && script.includes('git checkout "$PREVIOUS"'))
 check('结束时清掉构建锁', script.includes('rm -f "$LOCK"'))

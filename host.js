@@ -5,6 +5,7 @@
  *  - 读出本机正在跑的 dsh 版本（@deepseek-ai/dsh 的 package.json version）；
  *  - 读官方 GitHub Releases（deepseek-ai/deepseek-harness，tag 形如 dsh-v0.2.2-rc.2），
  *    取其中版本号最高的一个，按 semver 比大小（含 rc/alpha 预发布规则）；
+ *  - 把最新 Release 的正文拆成「小节 + 条目」，按中英文分开回传，弹窗显示更新简介；
  *  - 结果缓存 30 分钟；网络失败时报错，绝不冒充「已是最新」；
  *  - 认出安装形态（源码仓库 / 全局 npm 包），给出对应的升级命令；
  *  - 可选的自动升级：后台跑一个由本文件生成的 shell 脚本，把进度写进状态文件，
@@ -47,6 +48,18 @@ const MAX_WALK_UP = 12
 const INSTALL_TTL_MS = 60 * 1000
 /** 升级日志最多回传多少字节的尾巴。 */
 const LOG_TAIL_BYTES = 64 * 1024
+/** 更新说明正文的解析上限：官方 Release 的 markdown 不会更大，超了只截断解析。 */
+const NOTE_BODY_MAX_CHARS = 80 * 1024
+/** 一条更新最多留多少字，长条目在弹窗里也只是累赘。 */
+const NOTE_ITEM_MAX_CHARS = 200
+/** 小节标题的长度上限。 */
+const NOTE_TITLE_MAX_CHARS = 40
+/** 每种语言最多回传多少条；界面看的是前几条，其余的让用户去发布页。 */
+const NOTE_ITEMS_MAX = 32
+/** 每个小节留几条：宁可每个分类都露一条，也别让第一个小节占满。 */
+const NOTE_SECTION_ITEMS_MAX = 4
+/** 每种语言开头的导语最多留多少字。 */
+const NOTE_INTRO_MAX_CHARS = 240
 /** 超过这个时间还没写 done，当成进程没了。 */
 const JOB_STALE_MS = 3 * 60 * 60 * 1000
 /** 升级请求体上限：只该是一个小 JSON。 */
@@ -453,6 +466,8 @@ function buildScript(kind, options) {
     '  [ "$AUTO" = "1" ] || return 0',
     '  phase restart',
     '  rm -f "$LOCK"',
+    '  # 启动器自己会重启 host：这里只解锁，不 nohup 起新进程，也不开浏览器。',
+    '  if [ "${DSH_LAUNCHER:-}" = "1" ]; then return 0; fi',
     '  ( cd "$REPO" && nohup ./start.sh --port "$PORT" --no-open >>"$DIR/restart.log" 2>&1 & )',
     '  n=0',
     '  while [ "$n" -lt 120 ]; do',
@@ -592,6 +607,149 @@ function startUpgrade(body, ctx) {
   }
 }
 
+/** HTML 实体还原成字符：`&amp;` 之类不该原样出现在弹窗里。 */
+function decodeEntities(text) {
+  return text
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&#x27;/gi, "'")
+    .replace(/&amp;/g, '&')
+}
+
+/**
+ * 把一段 markdown 行内文本变成纯文本：去掉 HTML 标签、图片、链接目标、
+ * 粗体/斜体/行内代码的记号。Release 里的链接在弹窗里没有点击的必要，
+ * 完整内容本来就有发布页。
+ */
+function plainText(text) {
+  let value = String(text)
+  value = value.replace(/<!--[\s\S]*?-->/g, ' ')
+  value = value.replace(/<br\s*\/?>/gi, ' ')
+  value = value.replace(/<[^>]+>/g, ' ')
+  value = value.replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+  value = value.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+  value = value.replace(/`([^`]*)`/g, '$1')
+  value = value.replace(/\*\*([^*]+)\*\*/g, '$1')
+  value = value.replace(/__([^_]+)__/g, '$1')
+  value = value.replace(/(^|\s)\*([^*\s][^*]*)\*/g, '$1$2')
+  value = value.replace(/(^|\s)_([^_\s][^_]*)_/g, '$1$2')
+  value = decodeEntities(value)
+  return value.replace(/\s+/g, ' ').trim()
+}
+
+/** 按字面截断，加省略号。 */
+function truncateText(text, limit) {
+  const value = String(text)
+  return value.length <= limit ? value : value.slice(0, limit - 1).trimEnd() + '…'
+}
+
+/** 这句话是哪国话：有中日韩文字算中文，有拉丁字母算英文。 */
+function noteLanguage(text) {
+  if (/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(text)) return 'zh'
+  if (/[A-Za-z]/.test(text)) return 'en'
+  return null
+}
+
+/** 读一行标题：`<h3 id="...">新增功能</h3>` 或 `### 新增功能`，没有就返回 null。 */
+function readHeading(line) {
+  const html = /^<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>\s*$/i.exec(line)
+  if (html !== null) {
+    const title = plainText(html[2])
+    return title === '' ? null : title
+  }
+  const markdown = /^#{1,6}\s+(.+)$/.exec(line)
+  if (markdown !== null) {
+    const title = plainText(markdown[1])
+    return title === '' ? null : title
+  }
+  return null
+}
+
+/** 读一条列表项，返回去掉前缀的正文；不是列表项返回 null。 */
+function readBullet(line) {
+  const match = /^[-*+]\s+(.+)$/.exec(line) ?? /^\d+[.)]\s+(.+)$/.exec(line)
+  return match === null ? null : match[1]
+}
+
+/** Release 正文里跟本版改动无关的行：语言切换、完整变更链接、注释、分隔线。 */
+function isNoteChrome(line) {
+  if (/^\[中文\]\(#/.test(line) || /^\[English\]\(#/.test(line)) return true
+  if (/^Full Changelog/i.test(line)) return true
+  if (/^<!--/.test(line)) return true
+  if (/^[-*_]{3,}$/.test(line)) return true
+  return false
+}
+
+/**
+ * 把 Release 正文拆成「按语言分组的小节 + 条目」。
+ *
+ * 官方 Release 是固定格式：开头的语言切换行、若干 `<h3>`/`###` 小节标题、
+ * `- ` 列表项、最后一行 Full Changelog。中英两半各占一段，小节标题本身
+ * 就能判断语言（「新增功能」/「New Features」），不依赖锚点 id。
+ *
+ * 每个语言回传 `{ total, intro, sections }`：total 是这条 Release 的条目总数
+ * （含没回传的），界面据此提示「还有 N 条」。
+ * @returns {Record<string, { total: number, intro: string, sections: Array<{ title: string, items: string[] }> }> | null}
+ */
+function summarizeNotes(body) {
+  if (typeof body !== 'string' || body.trim() === '') return null
+  const source = body.length > NOTE_BODY_MAX_CHARS ? body.slice(0, NOTE_BODY_MAX_CHARS) : body
+  const buckets = new Map()
+  let section = null
+  let sectionLang = null
+
+  const bucketOf = (lang) => {
+    let bucket = buckets.get(lang)
+    if (bucket === undefined) {
+      bucket = { total: 0, kept: 0, intro: '', sections: [] }
+      buckets.set(lang, bucket)
+    }
+    return bucket
+  }
+
+  for (const rawLine of source.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (line === '' || isNoteChrome(line)) continue
+    const title = readHeading(line)
+    if (title !== null) {
+      sectionLang = noteLanguage(title)
+      section = null
+      if (sectionLang === null) continue
+      section = { title: truncateText(title, NOTE_TITLE_MAX_CHARS), items: [] }
+      bucketOf(sectionLang).sections.push(section)
+      continue
+    }
+    const bullet = readBullet(line)
+    const text = plainText(bullet === null ? line : bullet)
+    if (text === '') continue
+    // 没有小节标题的段落（导语、说明）就按文字本身判断语言。
+    const lang = sectionLang ?? noteLanguage(text)
+    if (lang === null) continue
+    const bucket = bucketOf(lang)
+    if (section === null) {
+      if (bucket.intro === '') bucket.intro = truncateText(text, NOTE_INTRO_MAX_CHARS)
+      continue
+    }
+    bucket.total += 1
+    if (section.items.length >= NOTE_SECTION_ITEMS_MAX || bucket.kept >= NOTE_ITEMS_MAX) continue
+    section.items.push(truncateText(text, NOTE_ITEM_MAX_CHARS))
+    bucket.kept += 1
+  }
+
+  const notes = {}
+  let kept = 0
+  for (const [lang, bucket] of buckets) {
+    const sections = bucket.sections.filter((entry) => entry.items.length > 0)
+    if (sections.length === 0 && bucket.intro === '') continue
+    notes[lang] = { total: bucket.total, intro: bucket.intro, sections }
+    kept += 1
+  }
+  return kept === 0 ? null : notes
+}
+
 /** 把 Release 行裁成界面要的字段。 */
 function brief(release) {
   if (release === null || release === undefined) return null
@@ -601,6 +759,7 @@ function brief(release) {
     prerelease: release.prerelease,
     publishedAt: release.publishedAt,
     url: release.url,
+    notes: summarizeNotes(release.body),
   }
 }
 
@@ -675,6 +834,8 @@ async function fetchReleases(ctx) {
       prerelease: item.prerelease === true || parsed.prerelease.length > 0,
       publishedAt: typeof item.published_at === 'string' ? item.published_at : null,
       url: typeof item.html_url === 'string' ? item.html_url : null,
+      // 发布说明只在这里解析成摘要，不回传整段 markdown。
+      body: typeof item.body === 'string' ? item.body : '',
     })
   }
   let latest = null
@@ -880,4 +1041,5 @@ export const __internals = {
   jobPaths,
   fetchReleases,
   buildStatus,
+  summarizeNotes,
 }

@@ -52,6 +52,9 @@ window.__ModuleLoader__.load({
         published: '发布时间',
         releasedAt: '发布于 {date}',
         dialogTitle: 'DSH 版本更新',
+        changesTitle: '本版改动',
+        changesMore: '还有 {n} 条，在发布页查看',
+        changesMorePlain: '另有 {n} 条未显示',
         howTo: '更新方式',
         sourceHint: '源码运行：git pull 之后重新 pnpm install',
         npmHint: '全局安装：npm i -g @deepseek-ai/dsh@latest',
@@ -116,6 +119,9 @@ window.__ModuleLoader__.load({
         published: 'Published',
         releasedAt: 'released {date}',
         dialogTitle: 'DSH version update',
+        changesTitle: 'What changed',
+        changesMore: '{n} more in the release notes',
+        changesMorePlain: '{n} more not shown',
         howTo: 'How to update',
         sourceHint: 'From source: git pull, then pnpm install',
         npmHint: 'Global install: npm i -g @deepseek-ai/dsh@latest',
@@ -475,6 +481,104 @@ window.__ModuleLoader__.load({
       return [job, setJob]
     }
 
+    /**
+     * 弹窗显示哪种语言的更新说明。官方 Release 一般只有中英两版：
+     * 界面是中文就用中文，其它语言优先英文。当前语言由 locale 服务写到
+     * document.documentElement.lang 上。
+     */
+    function noteLanguageOrder() {
+      var lang = ''
+      try {
+        lang = typeof document !== 'undefined' ? String(document.documentElement.lang || '') : ''
+      } catch { lang = '' }
+      return lang.indexOf('zh') === 0 ? ['zh', 'en'] : ['en', 'zh']
+    }
+
+    /** 官方 Release 只有中英两版，界面语言对不上时用它标出正文是哪国话。 */
+    var NOTE_LANG_LABEL = { zh: '中文', en: 'English' }
+
+    /**
+     * 从 host 给的分语言摘要里挑一份能显示的。
+     * @returns {{ lang: string, entry: object } | null}
+     */
+    function pickNotes(notes) {
+      if (notes === null || typeof notes !== 'object') return null
+      var order = noteLanguageOrder()
+      for (var index = 0; index < order.length; index += 1) {
+        var entry = notes[order[index]]
+        if (entry === null || typeof entry !== 'object') continue
+        var hasSections = Array.isArray(entry.sections) && entry.sections.length > 0
+        var hasIntro = typeof entry.intro === 'string' && entry.intro !== ''
+        if (!hasSections && !hasIntro) continue
+        return { lang: order[index], entry: entry }
+      }
+      return null
+    }
+
+    /**
+     * 弹窗里的「本版改动」：小节标题加条目，超出高度就在块内滚动。
+     * host 只回传每种语言的前几条，没收全的用一行链接指到发布页。
+     */
+    function NotesBlock(props) {
+      var t = props.t
+      var picked = pickNotes(props.notes)
+      if (picked === null) return null
+      var notes = picked.entry
+      var order = noteLanguageOrder()
+      var groups = []
+      var shown = 0
+      var sections = Array.isArray(notes.sections) ? notes.sections : []
+      for (var index = 0; index < sections.length; index += 1) {
+        var section = sections[index]
+        if (section === null || typeof section !== 'object' || !Array.isArray(section.items)) continue
+        var items = []
+        for (var item = 0; item < section.items.length; item += 1) {
+          if (typeof section.items[item] !== 'string' || section.items[item] === '') continue
+          items.push(h('li', { key: 'i' + item }, section.items[item]))
+          shown += 1
+        }
+        if (items.length === 0) continue
+        groups.push(h('div', { key: 's' + index, className: 'dsvc-notes-section' },
+          typeof section.title === 'string' && section.title !== ''
+            ? h('div', { className: 'dsvc-notes-title' }, section.title)
+            : null,
+          h('ul', { className: 'dsvc-notes-list' }, items)))
+      }
+      var intro = typeof notes.intro === 'string' ? notes.intro : ''
+      if (groups.length === 0 && intro === '') return null
+      var total = typeof notes.total === 'number' && notes.total > shown ? notes.total : shown
+      var head = [h('span', { key: 'label' }, t('changesTitle'))]
+      if (picked.lang !== order[0]) {
+        head.push(h('span', { key: 'lang', className: 'dsvc-notes-lang' }, NOTE_LANG_LABEL[picked.lang] || picked.lang))
+      }
+      var children = [h('div', { key: 'head', className: 'dsvc-notes-head' }, head)]
+      var body = []
+      if (intro !== '') body.push(h('p', { key: 'intro', className: 'dsvc-notes-intro' }, intro))
+      if (groups.length > 0) body.push(h('div', { key: 'groups' }, groups))
+      // 滚动区自己可聚焦，键盘用户不用 Tab 到面板外也能滚。
+      children.push(h('div', {
+        key: 'body',
+        className: 'dsvc-notes-body',
+        role: 'region',
+        tabIndex: 0,
+        'aria-label': t('changesTitle'),
+      }, body))
+      if (total > shown) {
+        var count = total - shown
+        var url = typeof props.releaseUrl === 'string' && props.releaseUrl !== '' ? props.releaseUrl : ''
+        children.push(url === ''
+          ? h('div', { key: 'more', className: 'dsvc-notes-more' }, t('changesMorePlain', { n: count }))
+          : h('a', {
+              key: 'more',
+              className: 'dsvc-notes-more',
+              href: url,
+              target: '_blank',
+              rel: 'noopener noreferrer',
+            }, h('span', null, t('changesMore', { n: count })), ICON_EXTERNAL))
+      }
+      return h('div', { className: 'dsvc-notes' }, children)
+    }
+
     function VersionDialog(props) {
       var t = props.t
       var info = versionInfo(props.data, props.error)
@@ -597,6 +701,11 @@ window.__ModuleLoader__.load({
               onClick: function () { props.onClose() },
             }, ICON_CLOSE)),
           h('div', { className: 'dsvc-rows' }, rows),
+          h(NotesBlock, {
+            t: t,
+            notes: latest === null ? null : latest.notes,
+            releaseUrl: latest !== null && typeof latest.url === 'string' ? latest.url : null,
+          }),
           h(UpdateBlock, {
             t: t,
             install: install,
@@ -890,6 +999,26 @@ window.__ModuleLoader__.load({
         '.dsvc-tag { flex: none; font-size: 10px; padding: 2px 5px; border-radius: 5px;',
         '  color: var(--dsw-alias-state-warn-label, #b45309); background: var(--dsw-alias-state-warn-tertiary, rgba(217,119,6,.14)); }',
         '.dsvc-error { color: var(--dsw-alias-state-error-primary, #dc2626); font-family: inherit; font-size: 12px; }',
+        // 本版改动：小节标题 + 条目，块内滚动。
+        '.dsvc-notes { flex: none; padding: 10px 14px 11px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.06)); }',
+        '.dsvc-notes-head { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; font-size: 12px;',
+        '  font-weight: 600; color: var(--dsw-alias-label-primary, #1f2328); }',
+        '.dsvc-notes-lang { padding: 0 5px; border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.1)); border-radius: 4px;',
+        '  font-size: 10px; font-weight: 400; line-height: 15px; color: var(--dsw-alias-label-tertiary, #6b7280); }',
+        '.dsvc-notes-body { max-height: min(176px, 22vh); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain;',
+        '  scrollbar-width: thin; scrollbar-gutter: stable; overflow-wrap: anywhere; border-radius: 4px; }',
+        '.dsvc-notes-body:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary, #4176e6); outline-offset: 2px; }',
+        '.dsvc-notes-body::-webkit-scrollbar { width: 8px; }',
+        '.dsvc-notes-body::-webkit-scrollbar-thumb { border-radius: 4px; background: var(--dsw-alias-border-l2, rgba(0,0,0,.2)); }',
+        '.dsvc-notes-intro { margin: 0 0 7px; font-size: 12px; line-height: 1.65; color: var(--dsw-alias-label-secondary, #4b5563); }',
+        '.dsvc-notes-section + .dsvc-notes-section { margin-top: 10px; }',
+        '.dsvc-notes-title { font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-secondary, #4b5563); }',
+        '.dsvc-notes-list { margin: 3px 0 0; padding-left: 15px; font-size: 12.5px; line-height: 1.65;',
+        '  color: var(--dsw-alias-label-secondary, #4b5563); }',
+        '.dsvc-notes-list li + li { margin-top: 3px; }',
+        '.dsvc-notes-more { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; font-size: 12px;',
+        '  color: var(--dsw-alias-label-secondary, #4b5563); text-decoration: none; }',
+        '.dsvc-notes-more:hover { color: var(--dsw-static-deepseek-500, #4176e6); text-decoration: underline; }',
         '.dsvc-hint { flex: none; padding: 10px 14px 12px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.06));',
         '  font-size: 12px; line-height: 1.8; color: var(--dsw-alias-label-secondary, #4b5563); }',
         '.dsvc-hint-title { font-size: 11px; color: var(--dsw-alias-label-tertiary, #6b7280); margin-bottom: 2px; }',
@@ -982,7 +1111,7 @@ window.__ModuleLoader__.load({
       inject: ['slots'],
       apply: apply,
       /** 测试用：直接渲染弹窗的两块。 */
-      __components: { VersionDialog: VersionDialog, UpdateBlock: UpdateBlock },
+      __components: { VersionDialog: VersionDialog, UpdateBlock: UpdateBlock, NotesBlock: NotesBlock },
     }
   },
 })

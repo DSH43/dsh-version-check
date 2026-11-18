@@ -19,10 +19,22 @@
 
 ![更新详情](assets/dialog.png)
 
-点这一块弹出小面板：当前版本、官方最新（带「预发布」标签）、发布时间、发布页链接、升级命令、复制命令、升级按钮、重新检查。
+点这一块弹出小面板：当前版本、官方最新（带「预发布」标签）、发布时间、本版改动、发布页链接、升级命令、复制命令、升级按钮、重新检查。
 点它不会触发旁边的「新建会话」按钮。
 
 官方构建（`ui-brand-official`）会先占住品牌名槽位，这时插件自动退到侧栏底部的列表槽位，内容一样，只是位置不同。
+
+## 本版改动
+
+弹窗中间那块「本版改动」直接来自官方 Release 的正文，不另找 changelog：
+
+- 按小节分组（新增功能 / 体验优化 / 问题修复 / 其他变更；英文发布对应 New Features / Improvements / Bug Fixes / Chores）。
+- 界面是中文就取中文部分，其它语言取英文部分；两种语言都没有时这一块不显示。
+- 每个小节最多留 4 条，每种语言最多 32 条；粗体、链接、行内代码这些 markdown 记号还原成纯文字，单条超过 200 字截断。
+- 这块最多 176px 高，超出在块内滚动；键盘 Tab 到这块也能滚。
+- 没收全的条目，块底是一行可点的「还有 N 条，在发布页查看」，直接打开这个版本的 Release。
+- Release 没写正文、或者 Host 还是老版本（返回值里没有 `notes`）时，这一块不出现，弹窗和以前一样。
+- 更新说明跟着版本检查结果缓存 30 分钟，不多发请求。
 
 ## 升级
 
@@ -41,6 +53,7 @@
   4. 构建失败会先回退到升级前的分支重新构建，然后照样把 dsh 起回来。
 - 构建期间 `./start.sh` 会看到 `building` 锁，直接拒绝启动，防止中途插进来一个版本对不上的实例。
 - 源码版要求检出目录里有 `start.sh`（本机这个启动脚本）才会自动重启；全局 npm 安装或者没有 `start.sh` 时只做升级，弹窗会写清楚要手动重启。
+- 在 DSH Web Launcher 里跑时（host 环境带 `DSH_LAUNCHER=1`），升级脚本只停 host、不自己 `nohup ./start.sh` 起新进程，也不开浏览器；启动器等 `building` 锁释放后自己把 host 重启。浏览器里用的时候行为不变。
 - 源码版升级完是 detached HEAD（HEAD 停在新 tag 上）。要留住这个版本：`git switch -c upgrade/v0.2.2-rc.2`。要回原来的分支：`git checkout upgrade/<原分支> && pnpm install --frozen-lockfile && pnpm run build`（失败时弹窗也会把这条命令写出来）。
 - 仓库有未提交的改动（不含未跟踪文件）时不允许自动升级，避免覆盖你的工作。
 - 同一时间只跑一个升级任务；状态写在 `$DSH_HOME/state/dsh-version-check/upgrade/`（`phase`、`done`、`output.log`、`building`），进程重启也读得到。
@@ -48,7 +61,7 @@
 ## 判断依据
 
 - 本机版本：从 dsh 启动入口读 `@deepseek-ai/dsh` 的 `package.json` 版本，源码运行和 npm 安装都能读到。
-- 官方版本：读 GitHub Releases（`deepseek-ai/deepseek-harness`），只认 `dsh-v*` 的 tag，跳过草稿。
+- 官方版本：读 GitHub Releases（`deepseek-ai/deepseek-harness`），只认 `dsh-v*` 的 tag，跳过草稿；最新那个 Release 的正文同时解析成中英文更新条目，供弹窗显示。
 - 比大小按 semver：`0.2.2-rc.2 > 0.2.1-rc.5`，`0.2.1-rc.5 < 0.2.1`，`alpha < rc`，数字段按数值比。
 - 官方最新是预发布版本时照样提示，但标出「预发布」，让你自己决定跟不跟。
 - 网络失败、限流、没有 Release，都显示「检查失败」，不会显示「已最新」。
@@ -79,7 +92,7 @@ dsh plugin --profile web add "file:/Users/leeo/Documents/workspace-ds/plugin/dsh
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/plugins/dsh-version-check/status[?refresh=1]` | 当前版本、最新版本、状态、错误、升级计划 |
+| GET | `/plugins/dsh-version-check/status[?refresh=1]` | 当前版本、最新版本、状态、错误、升级计划；`latest.notes` 是分语言的更新条目 |
 | GET | `/plugins/dsh-version-check/upgrade` | 当前升级任务的 phase / 日志尾巴 / 结果 |
 | POST | `/plugins/dsh-version-check/upgrade` | 启动升级，body `{"version":"...","tag":"...","confirm":true}` |
 
@@ -88,8 +101,8 @@ POST 走 dsh 连接服务的信任与鉴权闸门；必须 `confirm: true`，`ta
 ## 开发
 
 ```bash
-node test-host.mjs    # semver、本机版本、安装形态、升级脚本、升级路由的拒绝路径（会访问 GitHub）
-node test-client.mjs  # 品牌槽位注册、退路、样式注入、弹窗渲染（真 React SSR）
+node test-host.mjs    # semver、更新说明解析、本机版本、安装形态、升级脚本、升级路由的拒绝路径（会访问 GitHub）
+node test-client.mjs  # 品牌槽位注册、退路、样式注入、弹窗渲染（真 React SSR，含本版改动块）
 ```
 
 `index.js` 是启动壳：host.js 加载失败只停用插件，不会把 dsh 启动拖死。

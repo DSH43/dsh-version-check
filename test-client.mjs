@@ -140,6 +140,9 @@ const { VersionDialog, UpdateBlock } = realMod.__components
 
 const dict = {
   dialogTitle: 'DSH 版本更新',
+  changesTitle: '本版改动',
+  changesMore: '还有 {n} 条，在发布页查看',
+  changesMorePlain: '另有 {n} 条未显示',
   currentLabel: '当前版本',
   latestLabel: '官方最新',
   published: '发布时间',
@@ -188,7 +191,25 @@ function t(key, params) {
   return template.replace(/\{(\w+)\}/g, (_, name) => (params[name] === undefined ? '' : String(params[name])))
 }
 
-const latest = { version: '0.2.2-rc.2', tag: 'dsh-v0.2.2-rc.2', prerelease: true, publishedAt: '2026-11-11T00:00:00Z', url: 'https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.2-rc.2' }
+const latest = {
+  version: '0.2.2-rc.2', tag: 'dsh-v0.2.2-rc.2', prerelease: true, publishedAt: '2026-11-11T00:00:00Z',
+  url: 'https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.2-rc.2',
+  notes: {
+    zh: {
+      total: 6,
+      intro: '这一版汇总了自上一个版本以来的主要变更。',
+      sections: [
+        { title: '新增功能', items: ['新增会话导入插件。', '支持按分支筛选改动。'] },
+        { title: '问题修复', items: ['修复窄屏下的弹窗溢出。'] },
+      ],
+    },
+    en: {
+      total: 6,
+      intro: 'This release collects the main changes since the last version.',
+      sections: [{ title: 'New Features', items: ['Add a chat import plugin.'] }],
+    },
+  },
+}
 const install = {
   kind: 'source', cwd: '/tmp/repo', command: 'cd /tmp/repo && git fetch --tags origin && git checkout dsh-v0.2.2-rc.2',
   canUpgrade: true, blocked: null, blockedDetail: null, remote: 'origin',
@@ -212,6 +233,51 @@ try {
 check('显示升级按钮和版本', dialogHtml.includes('升级到 0.2.2-rc.2'), dialogHtml.slice(0, 200))
 check('显示复制命令按钮', dialogHtml.includes('复制命令'))
 check('显示升级命令', dialogHtml.includes('git checkout dsh-v0.2.2-rc.2'))
+check('显示本版改动的小节和导语', dialogHtml.includes('本版改动') && dialogHtml.includes('新增功能')
+  && dialogHtml.includes('这一版汇总了自上一个版本以来的主要变更。'), dialogHtml.slice(0, 500))
+check('显示更新条目', dialogHtml.includes('新增会话导入插件。') && dialogHtml.includes('修复窄屏下的弹窗溢出。'))
+check('没收全的条目给出链接', dialogHtml.includes('还有 3 条，在发布页查看')
+  && dialogHtml.includes('href="https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.2-rc.2"'), dialogHtml.slice(0, 500))
+
+const enHtml = (() => {
+  document.documentElement.lang = 'en'
+  const enDict = { changesTitle: 'What changed', changesMore: '{n} more in the release notes' }
+  const tEn = (key, params) => {
+    const template = enDict[key] === undefined ? key : enDict[key]
+    if (params === undefined) return template
+    return template.replace(/\{(\w+)\}/g, (_, name) => (params[name] === undefined ? '' : String(params[name])))
+  }
+  try {
+    return render(VersionDialog, { t: tEn, data: statusData, error: null, loading: false, onClose() {}, onRefresh() {} })
+  } finally {
+    document.documentElement.lang = 'zh-CN'
+  }
+})()
+check('英文界面用英文说明', enHtml.includes('New Features') && enHtml.includes('Add a chat import plugin.')
+  && enHtml.includes('5 more') && !enHtml.includes('新增功能'), enHtml.slice(0, 500))
+
+const withoutNotes = render(VersionDialog, {
+  t, data: { ...statusData, latest: { ...latest, notes: null } }, error: null, loading: false, onClose() {}, onRefresh() {},
+})
+check('没有更新说明时不出这一块', !withoutNotes.includes('本版改动'), withoutNotes.slice(0, 300))
+
+const bareNotes = render(realMod.__components.NotesBlock, { t, notes: null })
+check('缺更新说明时块直接不渲染', bareNotes === '', bareNotes)
+
+const introOnlyHtml = render(realMod.__components.NotesBlock, {
+  t, notes: { zh: { total: 0, intro: '这一版只修了安全问题。', sections: [] } },
+})
+check('只有导语时也显示', introOnlyHtml.includes('本版改动') && introOnlyHtml.includes('这一版只修了安全问题。'), introOnlyHtml)
+
+const noUrlHtml = render(realMod.__components.NotesBlock, {
+  t, notes: { zh: { total: 9, intro: '', sections: [{ title: '新增功能', items: ['一条更新。'] }] } }, releaseUrl: null,
+})
+check('没有发布页链接时只说明未显示', noUrlHtml.includes('另有 8 条未显示') && !noUrlHtml.includes('<a '), noUrlHtml)
+
+const fallbackHtml = render(realMod.__components.NotesBlock, {
+  t, notes: { en: { total: 1, intro: '', sections: [{ title: 'New Features', items: ['One item.'] }] } }, releaseUrl: null,
+})
+check('回退英文时标出语言', fallbackHtml.includes('New Features') && fallbackHtml.includes('English'), fallbackHtml)
 
 const runningHtml = render(UpdateBlock, {
   t, install, latest, current: '0.2.1-rc.5', available: true, copied: false, confirming: false, busy: false, error: null,
