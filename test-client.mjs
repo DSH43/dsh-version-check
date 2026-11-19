@@ -170,6 +170,9 @@ const dict = {
   upgradeDone: '已升级到 {v}',
   versionMismatch: '装完读到的版本是 {v}',
   upgradeFailed: '升级失败（退出码 {code}）',
+  failedStep: '失败在「{step}」',
+  failedDetail: '原因：{detail}',
+  retryHint: 'git 拉取失败会自动重试 3 次',
   rollbackHint: '退回原来的版本：{cmd}',
   startFailed: '升级没能启动：{code}',
   blockedDirty: '仓库有未提交的改动',
@@ -336,7 +339,25 @@ const staleHtml = render(UpdateBlock, {
   job: { state: 'failed', phase: 'build', version: '0.2.2-rc.2', log: ['boom'], exitCode: 1, rollback: 'git checkout main', finishedAt: Date.now() - 5 * 60 * 60 * 1000 },
   onCopy() {}, onUpgrade() {}, onConfirm() {}, onCancel() {},
 })
-check('五小时前的失败记录收起来', !staleHtml.includes('升级失败'), staleHtml.slice(0, 200))
+check('五小时前的失败记录还留着', staleHtml.includes('升级失败'), staleHtml.slice(0, 200))
+
+const ancientHtml = render(UpdateBlock, {
+  t, install, latest, current: '0.2.1-rc.5', available: true, copied: false, confirming: false, busy: false, error: null,
+  job: { state: 'failed', phase: 'build', version: '0.2.2-rc.2', log: ['boom'], exitCode: 1, rollback: 'git checkout main', finishedAt: Date.now() - 8 * 24 * 60 * 60 * 1000 },
+  onCopy() {}, onUpgrade() {}, onConfirm() {}, onCancel() {},
+})
+check('八天前的失败记录收起来', !ancientHtml.includes('升级失败'), ancientHtml.slice(0, 200))
+
+const reasonHtml = render(UpdateBlock, {
+  t, install, latest, current: '0.2.1-rc.5', available: true, copied: false, confirming: false, busy: false, error: null,
+  job: {
+    state: 'failed', phase: 'restart', version: '0.2.2-rc.2', log: ['boom'], exitCode: 128, rollback: 'git checkout main',
+    failure: { step: 'fetch', detail: 'fatal: unable to access GitHub' }, finishedAt: Date.now(),
+  },
+  onCopy() {}, onUpgrade() {}, onConfirm() {}, onCancel() {},
+})
+check('失败时说明卡在哪一步', reasonHtml.includes('拉取新版本') && reasonHtml.includes('fatal: unable to access GitHub'), reasonHtml.slice(0, 400))
+check('git 失败时说明会重试', reasonHtml.includes('重试 3 次'), reasonHtml.slice(0, 400))
 
 console.log(failed === 0 ? '\n全部通过' : '\n失败 ' + failed + ' 项')
 process.exitCode = failed === 0 ? 0 : 1

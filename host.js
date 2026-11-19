@@ -270,14 +270,23 @@ function pickRemote(cwd) {
   return listed[0]
 }
 
+/** 网络类步骤重试几次：第一次之外再试 3 次。 */
+const STEP_RETRIES = 3
+
 /** 源码升级要按顺序跑的步骤（也用于生成给用户复制的命令）。 */
 function sourceSteps(cwd, remote, tag) {
   return [
-    ['fetch', ['git', 'fetch', '--tags', '--prune', remote]],
-    ['checkout', ['git', '-c', 'advice.detachedHead=false', 'checkout', tag]],
-    ['install', ['pnpm', 'install', '--frozen-lockfile']],
-    ['build', ['pnpm', 'run', 'build']],
+    { phase: 'fetch', argv: ['git', 'fetch', '--tags', '--prune', remote], retry: true },
+    { phase: 'checkout', argv: ['git', '-c', 'advice.detachedHead=false', 'checkout', tag], retry: false },
+    { phase: 'install', argv: ['pnpm', 'install', '--frozen-lockfile'], retry: false },
+    { phase: 'build', argv: ['pnpm', 'run', 'build'], retry: false },
   ]
+}
+
+/** 手动复制的那条命令里给 git fetch 套的重试：连不上 GitHub 时别第一次就放弃。 */
+function retryFetchCommand(remote) {
+  const fetch = remote === null ? 'git fetch --tags' : `git fetch --tags --prune ${remote}`
+  return `n=0; until ${fetch}; do n=$((n+1)); [ $n -gt ${STEP_RETRIES} ] && exit 1; sleep $((n * 5)); done`
 }
 
 /**
@@ -311,13 +320,12 @@ function planFor(install, latest) {
   if (latest === null) {
     plan.canUpgrade = false
     plan.blocked = 'no-version'
-    plan.command = `cd ${displayPath(install.cwd ?? '.')} && git fetch --tags && pnpm install --frozen-lockfile && pnpm run build`
+    plan.command = `cd ${displayPath(install.cwd ?? '.')} && (${retryFetchCommand(null)}) && pnpm install --frozen-lockfile && pnpm run build`
     return plan
   }
   const remote = pickRemote(install.cwd)
   plan.remote = remote
-  const head = remote === null ? 'git fetch --tags' : `git fetch --tags ${remote}`
-  plan.command = `cd ${displayPath(install.cwd)} && ${head} && git -c advice.detachedHead=false checkout ${latest.tag} && pnpm install --frozen-lockfile && pnpm run build`
+  plan.command = `cd ${displayPath(install.cwd)} && (${retryFetchCommand(remote)}) && git -c advice.detachedHead=false checkout ${latest.tag} && pnpm install --frozen-lockfile && pnpm run build`
   const dirty = remote === null ? { ok: false, stdout: '' } : gitSync(install.cwd, ['status', '--porcelain', '--untracked-files=no'])
   if (remote === null) plan.blocked = 'no-remote'
   else if (dirty.ok && dirty.stdout !== '') plan.blocked = 'dirty'
@@ -341,6 +349,8 @@ function jobPaths() {
     job: join(dir, 'job.json'),
     phase: join(dir, 'phase'),
     done: join(dir, 'done'),
+    reason: join(dir, 'reason'),
+    detail: join(dir, 'detail'),
     log: join(dir, 'output.log'),
     script: join(dir, 'run.sh'),
   }
@@ -386,6 +396,10 @@ function readJob() {
   if (record === null || typeof record !== 'object') return null
   let phase = ''
   try { phase = readFileSync(paths.phase, 'utf8').trim() } catch { /* 还没写 */ }
+  let reason = ''
+  try { reason = readFileSync(paths.reason, 'utf8').trim() } catch { /* 没失败过 */ }
+  let detail = ''
+  try { detail = readFileSync(paths.detail, 'utf8').trim() } catch { /* 没失败过 */ }
   const done = readJsonFile(paths.done)
   const running = done === null
   let state = 'running'
@@ -417,6 +431,7 @@ function readJob() {
     rollback: typeof record.rollback === 'string' ? record.rollback : null,
     restart: typeof record.restart === 'string' ? record.restart : null,
     installedVersion,
+    failure: state === 'failed' && reason !== '' ? { step: reason, detail } : null,
     warning: state === 'done' && installedVersion !== null && installedVersion !== record.version ? 'version-mismatch' : null,
     finishedAt: done !== null && typeof done.finishedAt === 'number' ? done.finishedAt : null,
   }
@@ -448,6 +463,9 @@ function buildScript(kind, options) {
     'phase() { printf "%s\\n" "$1" >"$DIR/phase"; printf "\\n== %s ==\\n" "$1" >>"$LOG"; }',
     "finish() { rm -f \"$LOCK\"; printf '{\"exitCode\":%s,\"finishedAt\":%s}\\n' \"$1\" \"$(date +%s)\" >\"$DIR/done\"; exit \"$1\"; }",
     'step() { name="$1"; shift; phase "$name"; "$@" >>"$LOG" 2>&1 || onfail "$name" $?; }',
+    'RETRIES=' + String(STEP_RETRIES),
+    // 网络类步骤（git fetch）失败再试，退避 5s / 10s / 15s。
+    'retry() { attempt=0; while :; do "$@" && return 0; attempt=$((attempt+1)); [ "$attempt" -gt "$RETRIES" ] && return 1; printf "retry %s/%s after %ss\\n" "$attempt" "$RETRIES" "$((attempt * 5))"; sleep "$((attempt * 5))"; done; }',
     'port_open() { lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; }',
     'stop_ui() {',
     '  [ "$AUTO" = "1" ] || return 0',
@@ -480,6 +498,10 @@ function buildScript(kind, options) {
     '}',
     'onfail() {',
     '  failcode="$2"',
+    // 失败步骤和错误行单独落盘：等 dsh 重启回来，界面还要靠它们说明原因。
+    '  printf "%s" "$1" >"$DIR/reason"',
+    '  { grep -E "fatal:|error:|Error:|failed|denied" "$LOG" 2>/dev/null | tail -n 2; } >"$DIR/detail"',
+    '  [ -s "$DIR/detail" ] || tail -n 2 "$LOG" >"$DIR/detail" 2>/dev/null || true',
     '  printf "step %s failed: %s\\n" "$1" "$failcode" >>"$LOG"',
     '  if [ -n "$PREVIOUS" ]; then',
     '    phase rollback',
@@ -494,8 +516,8 @@ function buildScript(kind, options) {
   if (kind === 'source') {
     lines.push('cd ' + shellQuote(options.cwd) + ' || finish 1')
     lines.push('stop_ui')
-    for (const [phaseName, argv] of sourceSteps(options.cwd, options.remote, options.tag)) {
-      lines.push('step ' + phaseName + ' ' + argv.map(shellQuote).join(' '))
+    for (const step of sourceSteps(options.cwd, options.remote, options.tag)) {
+      lines.push('step ' + step.phase + ' ' + (step.retry === true ? 'retry ' : '') + step.argv.map(shellQuote).join(' '))
     }
     lines.push('restart_ui')
     lines.push('phase verify')
@@ -572,7 +594,7 @@ function startUpgrade(body, ctx) {
       startedAt: Date.now(),
     }
     // 旧任务的文件先清掉，界面不会把上一轮的结果当成这一轮的。
-    for (const stale of [paths.phase, paths.done]) {
+    for (const stale of [paths.phase, paths.done, paths.reason, paths.detail]) {
       try { writeFileSync(stale, '') } catch { /* 无所谓 */ }
     }
     try { writeFileSync(paths.log, '') } catch { /* 无所谓 */ }
@@ -776,6 +798,7 @@ function emptyStatus() {
     error: null,
     detail: null,
     install: null,
+    failure: null,
   }
 }
 
@@ -903,6 +926,21 @@ async function buildStatus(ctx, force) {
     return status
   }
   status.state = compareVersions(upstream.latest.parsed, current) > 0 ? 'available' : 'current'
+  // 上一轮升级失败了、目标版本还没装上：把原因带出来，界面在图标旁挂个小叹号。
+  // 后来手动升到那个版本了，这条记录就该闭嘴。
+  const last = readJob()
+  if (last !== null && last.state === 'failed' && last.failure !== null) {
+    const target = parseVersion(last.version)
+    if (target !== null && compareVersions(target, current) > 0) {
+      status.failure = {
+        version: last.version,
+        step: last.failure.step,
+        detail: last.failure.detail,
+        exitCode: last.exitCode,
+        at: last.finishedAt,
+      }
+    }
+  }
   return status
 }
 

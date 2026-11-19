@@ -9,7 +9,7 @@
  *  5. 安装形态识别、升级命令、升级路由的拒绝路径（不会真的启动升级）。
  */
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -190,6 +190,9 @@ const scriptOptions = {
 const script = internals.buildScript('source', scriptOptions)
 check('脚本逐个 phase 推进', ['step fetch', 'step checkout', 'step install', 'step build', 'finish 0'].every((part) => script.includes(part)))
 check('脚本对失败留痕', script.includes('>"$DIR/done"'))
+check('fetch 失败会重试', script.includes('step fetch retry') && script.includes('retry() {') && script.includes('RETRIES=3'))
+check('失败步骤和错误行落盘', script.includes('>"$DIR/reason"') && script.includes('>"$DIR/detail"'))
+check('复制用的命令也带重试', plan.command.includes('until git fetch'), String(plan.command))
 check('先停旧的再动手', script.indexOf('stop_ui\n') > 0 && script.indexOf('stop_ui') < script.indexOf('step fetch'), String(script.indexOf('stop_ui')))
 check('构建完自己起回来并刷新', script.includes('restart_ui') && script.includes('./start.sh --refresh'))
 check('启动器里只解锁、不自己重启', script.includes('DSH_LAUNCHER:-') && script.includes('then return 0; fi'))
@@ -251,6 +254,25 @@ const tagMismatch = await callUpgrade({
 check('tag 与版本对不上就不启动', tagMismatch.status === 400 && JSON.parse(tagMismatch.body).error === 'bad-tag', tagMismatch.body)
 
 check('被拒绝的请求没有留下任务', internals.readJob() === null)
+
+console.log('失败原因留到重启之后')
+const failPaths = internals.jobPaths()
+mkdirSync(failPaths.dir, { recursive: true })
+writeFileSync(failPaths.job, JSON.stringify({
+  id: 'up-test', version: '9.9.9-rc.1', tag: 'dsh-v9.9.9-rc.1', kind: 'source',
+  cwd: install.cwd, startedAt: Date.now() - 60_000, auto: false,
+}))
+writeFileSync(failPaths.done, JSON.stringify({ exitCode: 128, finishedAt: Date.now() }))
+writeFileSync(failPaths.reason, 'fetch')
+writeFileSync(failPaths.detail, 'fatal: unable to access GitHub')
+const failedJob = internals.readJob()
+check('失败任务带失败步骤', failedJob.state === 'failed' && failedJob.failure !== null && failedJob.failure.step === 'fetch',
+  JSON.stringify(failedJob.failure))
+check('失败任务带错误行', failedJob.failure !== null && failedJob.failure.detail.includes('fatal'), String(failedJob.failure?.detail))
+for (const stale of [failPaths.job, failPaths.done, failPaths.reason, failPaths.detail]) {
+  try { writeFileSync(stale, '') } catch { /* 临时目录 */ }
+}
+check('清掉记录后没有任务', internals.readJob() === null)
 
 for (const cleanup of cleanups) cleanup()
 

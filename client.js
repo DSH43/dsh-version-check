@@ -36,6 +36,8 @@ window.__ModuleLoader__.load({
     var JOB_POLL_MS = 1200
     /** 完成/失败记录留多久。重启过之后那条「重启让它生效」就不该再露面。 */
     var JOB_KEEP_MS = 2 * 60 * 60 * 1000
+    /** 失败记录留久一点：要让人看见上次为什么没升上去。 */
+    var JOB_FAIL_KEEP_MS = 7 * 24 * 60 * 60 * 1000
 
     var STRINGS = {
       zh: {
@@ -82,6 +84,11 @@ window.__ModuleLoader__.load({
         upgradeDone: '已升级到 {v}',
         versionMismatch: '装完读到的版本是 {v}，和预期不一致',
         upgradeFailed: '升级失败（退出码 {code}）',
+        failedBadge: '上次升级失败',
+        failedTip: '上次升级到 {v} 失败',
+        failedStep: '失败在「{step}」',
+        failedDetail: '原因：{detail}',
+        retryHint: 'git 拉取失败会自动重试 3 次，退避 5 秒、10 秒、15 秒。',
         rollbackHint: '退回原来的版本：{cmd}',
         startFailed: '升级没能启动：{code}',
         blockedDirty: '仓库有未提交的改动，自动升级会覆盖它们。先提交或 stash。',
@@ -149,6 +156,11 @@ window.__ModuleLoader__.load({
         upgradeDone: 'Upgraded to {v}',
         versionMismatch: 'installed version reads {v}, expected a different one',
         upgradeFailed: 'Upgrade failed (exit {code})',
+        failedBadge: 'last upgrade failed',
+        failedTip: 'Last upgrade to {v} failed',
+        failedStep: 'failed at “{step}”',
+        failedDetail: 'reason: {detail}',
+        retryHint: 'git fetch retries up to 3 times, backing off 5s, 10s, 15s.',
         rollbackHint: 'Go back to the old version: {cmd}',
         startFailed: 'Upgrade did not start: {code}',
         blockedDirty: 'The repository has uncommitted changes an upgrade would overwrite. Commit or stash them first.',
@@ -328,7 +340,9 @@ window.__ModuleLoader__.load({
       var status = stateOf(data, error)
       var current = data !== null && typeof data.current === 'string' ? data.current : null
       var latest = data !== null && data.latest !== null && typeof data.latest === 'object' ? data.latest : null
-      return { status: status, current: current, latest: latest }
+      var failure = data !== null && typeof data === 'object'
+        && data.failure !== null && data.failure !== undefined && typeof data.failure === 'object' ? data.failure : null
+      return { status: status, current: current, latest: latest, failure: failure }
     }
 
     /** 把宿主机给的错误码翻成当前语言，细节（如 HTTP 404）拼在后面。 */
@@ -367,13 +381,20 @@ window.__ModuleLoader__.load({
     }
 
     function tooltipText(t, info) {
+      var text
       if (info.status === 'available' && info.latest !== null) {
-        return t('newVersion') + ' ' + info.latest.version + (info.latest.prerelease === true ? ' （' + t('prerelease') + '）' : '')
+        text = t('newVersion') + ' ' + info.latest.version + (info.latest.prerelease === true ? ' （' + t('prerelease') + '）' : '')
+      } else if (info.status === 'current') {
+        text = t('upToDate') + (info.current !== null ? ' ' + info.current : '')
+      } else if (info.status === 'unknown') {
+        text = t('unknownCurrent')
+      } else if (info.status === 'error') {
+        text = t('checkFailed')
+      } else {
+        text = t('checking') + '…'
       }
-      if (info.status === 'current') return t('upToDate') + (info.current !== null ? ' ' + info.current : '')
-      if (info.status === 'unknown') return t('unknownCurrent')
-      if (info.status === 'error') return t('checkFailed')
-      return t('checking') + '…'
+      if (info.failure !== null) text = text + '\n' + failureFullText(t, info.failure)
+      return text
     }
 
     var BLOCKED_LABEL = {
@@ -409,6 +430,25 @@ window.__ModuleLoader__.load({
       return key === undefined ? t('phaseStart') : t(key)
     }
 
+    /** 失败在哪一步、报了什么：步骤名和进度用同一套标签。 */
+    function failureReasonText(t, failure) {
+      if (failure === null || typeof failure !== 'object') return ''
+      var key = PHASE_LABEL[failure.step]
+      var step = key !== undefined ? t(key) : String(failure.step || '')
+      var text = t('failedStep', { step: step })
+      var detail = typeof failure.detail === 'string' ? failure.detail.replace(/\s+/g, ' ').trim() : ''
+      if (detail !== '') text = text + ' · ' + t('failedDetail', { detail: detail })
+      return text
+    }
+
+    function failureFullText(t, failure) {
+      if (failure === null || typeof failure !== 'object') return ''
+      var head = typeof failure.version === 'string' && failure.version !== '' ? t('failedTip', { v: failure.version }) : ''
+      var body = failureReasonText(t, failure)
+      if (head === '') return body
+      return body === '' ? head : head + ' · ' + body
+    }
+
     /**
      * 该不该把上一轮升级的记录显示出来。
      * 装完并且已经重启到那个版本了，就没什么好说的；太旧的记录也收起来。
@@ -417,7 +457,10 @@ window.__ModuleLoader__.load({
       if (job === null || typeof job !== 'object') return null
       if (job.state === 'running') return job
       if (job.state === 'done' && current !== null && (job.installedVersion === current || job.version === current)) return null
-      if (typeof job.finishedAt === 'number' && Date.now() - job.finishedAt > JOB_KEEP_MS) return null
+      if (typeof job.finishedAt === 'number') {
+        var keep = job.state === 'failed' || job.state === 'lost' ? JOB_FAIL_KEEP_MS : JOB_KEEP_MS
+        if (Date.now() - job.finishedAt > keep) return null
+      }
       return job
     }
 
@@ -771,6 +814,14 @@ window.__ModuleLoader__.load({
       if (job !== null && typeof job === 'object' && (job.state === 'failed' || job.state === 'lost')) {
         var code = job.state === 'lost' || job.exitCode === null || job.exitCode === undefined ? '?' : job.exitCode
         children.push(h('div', { key: 'fail', className: 'dsvc-note dsvc-fail' }, t('upgradeFailed', { code: String(code) })))
+        if (job.failure !== null && typeof job.failure === 'object') {
+          children.push(h('div', { key: 'reason', className: 'dsvc-note dsvc-fail' }, failureReasonText(t, job.failure)))
+          if (job.failure.step === 'fetch') {
+            children.push(h('div', { key: 'retry', className: 'dsvc-note dsvc-note-dim' }, t('retryHint')))
+          }
+        } else if (PHASE_LABEL[job.phase] !== undefined) {
+          children.push(h('div', { key: 'phase', className: 'dsvc-note' }, phaseText(t, job.phase)))
+        }
         if (Array.isArray(job.log) && job.log.length > 0) {
           children.push(h('pre', { key: 'log', className: 'dsvc-log' }, job.log.join('\n')))
         }
@@ -881,6 +932,17 @@ window.__ModuleLoader__.load({
         key: 'state',
         className: 'dsvc-state ' + (STATE_COLOR[info.status] || 'dsvc-state-muted'),
       }, stateText(t, info)))
+      // 上一次升级失败还没解决：状态文字旁边挂个小叹号，悬停和 aria 里写清原因。
+      if (info.failure !== null) {
+        var failText = failureFullText(t, info.failure)
+        line.push(h('span', {
+          key: 'fail',
+          className: 'dsvc-alert',
+          role: 'img',
+          title: failText,
+          'aria-label': failText,
+        }, '!'))
+      }
 
       return h('span', {
           className: 'dsvc-brand',
@@ -920,9 +982,10 @@ window.__ModuleLoader__.load({
         })
       })
 
-      var dot = info.status === 'available' ? h('span', { className: 'dsvc-dot' })
-        : info.status === 'error' || info.status === 'unknown' ? h('span', { className: 'dsvc-dot dsvc-dot-warn' })
-          : null
+      var dot = info.failure !== null ? h('span', { className: 'dsvc-dot dsvc-dot-fail' })
+        : info.status === 'available' ? h('span', { className: 'dsvc-dot' })
+          : info.status === 'error' || info.status === 'unknown' ? h('span', { className: 'dsvc-dot dsvc-dot-warn' })
+            : null
 
       var trigger = wide
         ? h('button', {
@@ -978,6 +1041,11 @@ window.__ModuleLoader__.load({
         '.dsvc-dot { position: absolute; top: -1px; right: -2px; width: 7px; height: 7px; border-radius: 50%;',
         '  background: var(--dsw-static-deepseek-500, #4176e6); box-shadow: 0 0 0 2px var(--dsw-alias-bg-layer-1, #fafafa); }',
         '.dsvc-dot-warn { background: var(--dsw-alias-state-warn-primary, #d97706); }',
+        '.dsvc-dot-fail { background: var(--dsw-alias-state-error-primary, #dc2626); }',
+        // 升级失败的小叹号：贴着版本状态文字，悬停看原因。
+        '.dsvc-alert { flex: none; display: inline-flex; align-items: center; justify-content: center;',
+        '  width: 11px; height: 11px; border-radius: 50%; background: var(--dsw-alias-state-error-primary, #dc2626);',
+        '  color: #fff; font-size: 8px; font-weight: 700; line-height: 1; cursor: help; }',
         // 弹窗。
         '.dsvc-overlay { position: fixed; inset: 0; z-index: 2147482400; display: flex; align-items: center;',
         '  justify-content: center; background: rgba(0,0,0,.35); }',

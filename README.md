@@ -14,6 +14,7 @@
 | 检查中 | `0.2.1-rc.5 检查中`，灰色 |
 | 查不到 | `0.2.1-rc.5 检查失败`，琥珀色，不冒充已最新 |
 | 读不到本机版本 | 只显示「读不到本地版本」 |
+| 上次升级失败 | 状态文字后面挂一个红色 `!`，悬停写清卡在哪一步、报了什么错 |
 
 ![侧栏品牌位：有新版本](assets/brand-available.png)
 
@@ -51,12 +52,14 @@
   2. `git fetch` / `checkout` / `pnpm install` / `pnpm run build`，每一步的 phase 和日志都写在状态文件里；
   3. 构建成功就把 dsh 起回来，再调 `start.sh --refresh` 刷新你原来那个标签页。页面中途会断开几分钟，不用管；
   4. 构建失败会先回退到升级前的分支重新构建，然后照样把 dsh 起回来。
+- `git fetch` 连不上 GitHub 时会自己重试 3 次（等 5 秒、10 秒、15 秒），不要一次失败就整轮作废；复制出来的命令里也是同样的重试循环。
+- 升级失败会把失败步骤和错误行写进 `reason`、`detail`，dsh 重启回来以后，版本状态旁边挂一个红色感叹号，悬停看原因；弹窗里同样写清卡在哪一步、git 报了什么。升到目标版本或者重试成功后这个叹号自己消失。
 - 构建期间 `./start.sh` 会看到 `building` 锁，直接拒绝启动，防止中途插进来一个版本对不上的实例。
 - 源码版要求检出目录里有 `start.sh`（本机这个启动脚本）才会自动重启；全局 npm 安装或者没有 `start.sh` 时只做升级，弹窗会写清楚要手动重启。
 - 在 DSH Web Launcher 里跑时（host 环境带 `DSH_LAUNCHER=1`），升级脚本只停 host、不自己 `nohup ./start.sh` 起新进程，也不开浏览器；启动器等 `building` 锁释放后自己把 host 重启。浏览器里用的时候行为不变。
 - 源码版升级完是 detached HEAD（HEAD 停在新 tag 上）。要留住这个版本：`git switch -c upgrade/v0.2.2-rc.2`。要回原来的分支：`git checkout upgrade/<原分支> && pnpm install --frozen-lockfile && pnpm run build`（失败时弹窗也会把这条命令写出来）。
 - 仓库有未提交的改动（不含未跟踪文件）时不允许自动升级，避免覆盖你的工作。
-- 同一时间只跑一个升级任务；状态写在 `$DSH_HOME/state/dsh-version-check/upgrade/`（`phase`、`done`、`output.log`、`building`），进程重启也读得到。
+- 同一时间只跑一个升级任务；状态写在 `$DSH_HOME/state/dsh-version-check/upgrade/`（`phase`、`done`、`reason`、`detail`、`output.log`、`building`），进程重启也读得到。
 
 ## 判断依据
 
@@ -92,7 +95,7 @@ dsh plugin --profile web add "file:/Users/leeo/Documents/workspace-ds/plugin/dsh
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/plugins/dsh-version-check/status[?refresh=1]` | 当前版本、最新版本、状态、错误、升级计划；`latest.notes` 是分语言的更新条目 |
+| GET | `/plugins/dsh-version-check/status[?refresh=1]` | 当前版本、最新版本、状态、错误、升级计划；`latest.notes` 是分语言的更新条目，`failure` 是上一次升级失败的步骤和错误行 |
 | GET | `/plugins/dsh-version-check/upgrade` | 当前升级任务的 phase / 日志尾巴 / 结果 |
 | POST | `/plugins/dsh-version-check/upgrade` | 启动升级，body `{"version":"...","tag":"...","confirm":true}` |
 
